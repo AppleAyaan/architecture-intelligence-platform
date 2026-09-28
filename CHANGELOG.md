@@ -13,7 +13,14 @@ aren't yet guaranteed stable pre-1.0.
 
 - Static type checking: `uv run pyright` (standard mode) now runs in CI's `quality` job over all
   of `app/`. Existing type errors were fixed without behavior changes, except the two listed under
-  Changed.
+  Changed. Only rule-scoped `# pyright: ignore[<rule>]` comments suppress errors; `# type: ignore`
+  is no longer honored.
+- Lint: ruff now also enforces flake8-bugbear, naive-datetime, blind-except, import-order,
+  pyupgrade, bandit (for `app/`) and ruff's own rules.
+- Contributor tooling: a checked-in `.claude/settings.json` adds best-effort Claude Code deny rules
+  for the common forms of merging pull requests, force-pushing and pushing directly to `main` (not
+  a security boundary; the rule itself stays procedural), and allows the exact check commands
+  without a prompt.
 
 ### Changed
 
@@ -25,6 +32,11 @@ aren't yet guaranteed stable pre-1.0.
   answer content (for example on a refusal), instead of an `AttributeError` or a `None` answer that
   failed when the query response was built. The HTTP outcome is unchanged (an error response on
   `/api/query` and the UI query page).
+
+### Fixed
+
+- The runtime demo's Neo4j healthcheck (`docker-compose.demo.yml`) now has a 60s start period, so a
+  slow cold start doesn't fail `mcp-demo.sh` with "container is unhealthy".
 
 ## [0.5.1] - 2026-09-27
 
