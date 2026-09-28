@@ -35,6 +35,7 @@ from app.sources.model import (
     IngestionResult,
     KubernetesSourceConfig,
     NotSupplied,
+    SourceInstanceId,
 )
 from app.sources.removal_authority import authorize_source_removal
 from app.sources.replay import ReplayCase, classify_replay_case
@@ -471,13 +472,19 @@ def _dropped_claim_owners(
     source_instance_id: str,
     run_source_ids: AbstractSet[str],
     run_emitters: Mapping[str, AbstractSet[str]],
-) -> dict[str, set[str]]:
+) -> dict[str, set[SourceInstanceId]]:
     """`committed_claim_owners` for `plan_source_claim_reconciliation`: this source plus every owner
     the claim will have after the run, so a dropped claim is `expired` only when nobody else will
-    own it, and `ownership_removed` otherwise."""
+    own it, and `ownership_removed` otherwise. Owner ids are stored as plain strings, and
+    `SourceInstanceId` is a typing-only NewType, so wrapping them changes no value."""
     return {
-        key: {source_instance_id}
-        | _owners_after_run(owners, key, run_source_ids=run_source_ids, run_emitters=run_emitters)
+        key: {
+            SourceInstanceId(owner)
+            for owner in {source_instance_id}
+            | _owners_after_run(
+                owners, key, run_source_ids=run_source_ids, run_emitters=run_emitters
+            )
+        }
         for key, owners in owned.items()
     }
 
@@ -520,8 +527,10 @@ def _write_nodes(
     for field_name, label in NODE_LABELS.items():
         query = _MERGE_NODE_TEMPLATE.format(label=label)
         for entity in getattr(model, field_name):
+            # Cypher can't parametrize a label; `label` comes from NODE_LABELS or a module-level
+            # carrier label constant, never from input, so the formatted query is not injectable.
             tx.run(
-                query,
+                query,  # pyright: ignore[reportArgumentType]
                 id=entity.id,
                 props=entity.model_dump(exclude={"id"}),
                 source_instance_id=source_instance_id,
@@ -548,8 +557,10 @@ def _write_pubsub_carrier_nodes(
     ):
         query = _MERGE_NODE_TEMPLATE.format(label=label)
         for carrier in carriers:
+            # Cypher can't parametrize a label; `label` comes from NODE_LABELS or a module-level
+            # carrier label constant, never from input, so the formatted query is not injectable.
             tx.run(
-                query,
+                query,  # pyright: ignore[reportArgumentType]
                 id=carrier.id,
                 props=carrier.model_dump(),
                 source_instance_id=source_instance_id,
@@ -755,8 +766,10 @@ def _write_relations(
 ) -> int:
     for relation in model.relations:
         query = _MERGE_RELATION_TEMPLATE.format(relation_type=relation.type)
+        # Cypher can't parametrize a relationship type; `_import_source_tx` rejects any type outside
+        # KNOWN_RELATION_TYPES before this runs, so the formatted query is not injectable.
         tx.run(
-            query,
+            query,  # pyright: ignore[reportArgumentType]
             source_id=relation.source_id,
             target_id=relation.target_id,
             key=relation_key(relation),
@@ -801,9 +814,11 @@ def _import_source_tx(
     locator: str,
     model: ArchitectureModel,
     result: IngestionResult,
-    semantic_input_digest: str,
-    discovery_scope_id: str,
-    scope_definition_digest: str,
+    # `None` only via `import_discovery_run` with a caller-built run result; the replay
+    # classification and the SourceState write both already handle it.
+    semantic_input_digest: str | None,
+    discovery_scope_id: str | None,
+    scope_definition_digest: str | None,
     committed_nodes_before: dict[str, dict] | None = None,
     committed_relations_before: dict[str, dict] | None = None,
     run_source_ids: AbstractSet[str] | None = None,
@@ -867,7 +882,7 @@ def _import_source_tx(
         run_node_emitters = {node_id: {source_instance_id} for node_id in new_node_ids}
         run_relation_emitters = {key: {source_instance_id} for key in new_relation_keys}
     node_plan = plan_source_claim_reconciliation(
-        source_instance_id=source_instance_id,
+        source_instance_id=SourceInstanceId(source_instance_id),
         committed_claim_owners=_dropped_claim_owners(
             owned_nodes,
             source_instance_id=source_instance_id,
@@ -877,7 +892,7 @@ def _import_source_tx(
         newly_emitted_claim_keys=new_node_ids,
     )
     relation_plan = plan_source_claim_reconciliation(
-        source_instance_id=source_instance_id,
+        source_instance_id=SourceInstanceId(source_instance_id),
         committed_claim_owners=_dropped_claim_owners(
             owned_relations,
             source_instance_id=source_instance_id,
@@ -1041,7 +1056,7 @@ def _remove_source_tx(
     existing_node_ids = set(owned_nodes)
     removed = {source_instance_id, *removed_source_ids}
     node_plan = plan_source_claim_reconciliation(
-        source_instance_id=source_instance_id,
+        source_instance_id=SourceInstanceId(source_instance_id),
         committed_claim_owners=_dropped_claim_owners(
             owned_nodes,
             source_instance_id=source_instance_id,
@@ -1051,7 +1066,7 @@ def _remove_source_tx(
         newly_emitted_claim_keys=frozenset(),
     )
     relation_plan = plan_source_claim_reconciliation(
-        source_instance_id=source_instance_id,
+        source_instance_id=SourceInstanceId(source_instance_id),
         committed_claim_owners=_dropped_claim_owners(
             owned_relations,
             source_instance_id=source_instance_id,
@@ -1138,6 +1153,7 @@ def _import_all_sources_tx(
     persisted_inventory = tx.run(
         _READ_CURRENT_INVENTORY_QUERY, discovery_scope_id=run_result.discovery_scope_id
     ).single()
+    assert persisted_inventory is not None  # the MERGE always yields exactly one row
     has_committed_inventory = persisted_inventory["inventory_revision"] is not None
     committed_discovery_scope_id = (
         persisted_inventory["discovery_scope_id"] if has_committed_inventory else None
@@ -1233,10 +1249,10 @@ def _import_all_sources_tx(
             source_instance_id = record["source_instance_id"]
             if source_instance_id in run_result.source_outcomes:
                 continue
-            # `known_states` can only be non-empty if a prior COMPLETE run already persisted both
-            # `SourceState` and `CurrentInventory` for this scope together (see the write below),
-            # so `has_committed_inventory` (hence `committed_discovery_scope_id`) is guaranteed set
-            # whenever this loop body runs.
+            # `committed_discovery_scope_id` is `None` when this scope has no committed inventory
+            # yet, which `known_states` does not rule out: `import_source` writes a scoped
+            # `SourceState` without a `CurrentInventory`. `authorize_source_removal` then denies
+            # enumeration-based removal; only an accepted tombstone can authorize it.
             decision = authorize_source_removal(
                 tombstone_validation=tombstone_validations.get(source_instance_id),
                 enumeration_status=run_result.inventory_status,
@@ -1402,6 +1418,8 @@ def import_discovery_run(
                 scope_definition_digest=run_result.scope_definition_digest,
             )
 
+        # _import_all_sources_tx rejects a commit-eligible run without an inventory snapshot.
+        assert run_result.inventory_snapshot is not None
         return ImportRunStats(
             inventory_status=run_result.inventory_status,
             committed=True,
