@@ -33,6 +33,10 @@ from app.architecture_intelligence.deployment_projection import (
 from app.provenance.model import ScopedObservedCall
 from app.telemetry.scoped_attribution import DISPOSITION_PRECEDENCE, LocalityDisposition
 
+# D14.2: this evaluator's rule identity, named in a local-assessment instance id.
+APPLICABILITY_RULE_ID = "scoped-caller-locality-applicability"
+APPLICABILITY_RULE_VERSION = 1
+
 # I1 §10 query-time reason codes (the ingestion-only ones never appear here, matrix §15.3).
 REASON_UNSUPPORTED_DIMENSION = "LOCALITY_UNSUPPORTED_DIMENSION"
 REASON_UNSUPPORTED_RELATION = "LOCALITY_UNSUPPORTED_RELATION"
@@ -484,7 +488,9 @@ def roll_up(record: ScopedObservedCall, pairs: Sequence[PairResult]) -> Candidat
         )
 
     applicable = [pair for pair in pairs if pair.disposition is LocalityDisposition.APPLICABLE]
-    workloads = {pair.workload.workload_id: pair.workload for pair in applicable if pair.workload}
+    # D4: only exactly identical Workload identities deduplicate. The logical `workload_id` omits
+    # the captured UID, so two incarnations of one logical Workload are distinct here (D14.1).
+    workloads = {pair.workload for pair in applicable if pair.workload}
     conflicting = [pair for pair in pairs if pair.disposition is LocalityDisposition.CONFLICT]
     if conflicting or len(workloads) > 1:
         reasons = set(_union(conflicting))
@@ -497,7 +503,7 @@ def roll_up(record: ScopedObservedCall, pairs: Sequence[PairResult]) -> Candidat
         return summary(LocalityDisposition.AMBIGUOUS, _union(ambiguous))
 
     if applicable:
-        [workload] = workloads.values()
+        [workload] = workloads
         return summary(
             LocalityDisposition.APPLICABLE,
             workload=workload,
